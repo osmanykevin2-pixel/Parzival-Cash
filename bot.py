@@ -1419,7 +1419,11 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
             bot.answer_callback_query(call.id, "✅ Opción seleccionada")
 
     except Exception as e:
-        print("Error:", e)
+        print("Error en button_click:", repr(e))
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Error interno: {e}")
+        except Exception:
+            pass
 
 
 print("✅ Bot Parzival Cash iniciado correctamente. Esperando mensajes...")
