@@ -34,12 +34,17 @@ AFILIADOS_LINK = "https://t.me/AfiliadosParzivalCash_bot?start=parzival"
 
 def ensure_user_exists(user_id, username=None):
     try:
-        existing = supabase.table("users").select("telegram_id").eq("telegram_id", user_id).execute()
+        existing = (
+            supabase.table("users")
+            .select("telegram_user_id")
+            .eq("telegram_user_id", user_id)
+            .execute()
+        )
 
         if not existing.data:
             supabase.table("users").insert({
-                "telegram_id": user_id,
-                "username": username
+                "telegram_user_id": user_id,
+                "telegram_username": username
             }).execute()
     except Exception as e:
         print(f"Error asegurando usuario en BD: {e}")
