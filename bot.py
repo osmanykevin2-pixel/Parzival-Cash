@@ -243,8 +243,19 @@ def mostrar_resumen_direcciones(chat_id, user_id):
 
     send_screen(user_id, chat_id, texto_guardado, reply_markup=markup_guardado)
 
+def manejar_comandos_globales(message):
+    texto = (message.text or "").strip()
+    if texto == "/start":
+        send_welcome(message)
+        return True
+    if texto == "/menu":
+        send_menu(message)
+        return True
+    return False
 
 def guardar_tarjeta(message):
+    if manejar_comandos_globales(message):
+        return
     user_id = message.from_user.id
     tarjeta = message.text.strip().replace("-", "").replace(" ", "")
 
@@ -264,6 +275,8 @@ def guardar_tarjeta(message):
     mostrar_resumen_direcciones(message.chat.id, user_id)
 
 def guardar_movil(message):
+    if manejar_comandos_globales(message):
+        return
     user_id = message.from_user.id
     movil = message.text.strip().replace(" ", "")
 
@@ -286,6 +299,8 @@ def guardar_movil(message):
     mostrar_resumen_direcciones(message.chat.id, user_id)
 
 def guardar_id_1xbet(message):
+    if manejar_comandos_globales(message):
+        return
     user_id = message.from_user.id
     nombre_usuario = message.from_user.first_name or "Usuario"
     xbet_id = message.text.strip()
@@ -340,6 +355,8 @@ def guardar_id_1xbet(message):
 
 
 def pedir_comprobante_recarga(message):
+    if manejar_comandos_globales(message):
+        return
     if not (message.photo or message.document):
         msg = bot.send_message(
             message.chat.id,
@@ -411,6 +428,8 @@ def pedir_comprobante_recarga(message):
 
 
 def recibir_captura_retiro(message):
+    if manejar_comandos_globales(message):
+        return
     if not (message.photo or message.document):
         msg = bot.send_message(
             message.chat.id,
@@ -481,6 +500,8 @@ def recibir_captura_retiro(message):
 
 
 def recibir_soporte(message):
+    if manejar_comandos_globales(message):
+        return
     user_id = message.from_user.id
     nombre = message.from_user.first_name or "Usuario"
     username = f"@{message.from_user.username}" if message.from_user.username else "Sin @usuario"
