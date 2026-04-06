@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
+httpx
+pyTelegramBotAPI
 python-dotenv
 supabase
-httpx
