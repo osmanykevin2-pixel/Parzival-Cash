@@ -50,26 +50,42 @@ def ensure_user_exists(user_id, username=None):
         print(f"Error asegurando usuario en BD: {e}")
 
 def db_get_user(user_id):
-    result = (
-        supabase.table("users")
-        .select("*")
-        .eq("telegram_user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    return result.data[0] if result.data else None
+    for intento in range(3):
+        try:
+            result = (
+                supabase.table("users")
+                .select("*")
+                .eq("telegram_user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            print("DEBUG db_get_user:", user_id, result.data)
+            return result.data[0] if result.data else None
+
+        except Exception as e:
+            print(f"Error en db_get_user (intento {intento + 1}):", repr(e))
+            time.sleep(1)
+
+    return None
 
 
 def db_upsert_user(user_id, data: dict):
     payload = {"telegram_user_id": user_id}
     payload.update(data)
 
-    result = (
-        supabase.table("users")
-        .upsert(payload, on_conflict="telegram_user_id")
-        .execute()
-    )
-    return result
+    for intento in range(3):
+        try:
+            result = (
+                supabase.table("users")
+                .upsert(payload, on_conflict="telegram_user_id")
+                .execute()
+            )
+            return result
+        except Exception as e:
+            print(f"Error en db_upsert_user (intento {intento + 1}):", repr(e))
+            time.sleep(1)
+
+    return None
 
 user_data = {}
 pending_recharges = {}
@@ -198,7 +214,12 @@ def mostrar_inicio_corto(chat_id, user_id):
 
 
 def crear_panel_usuario(user_id, nombre_usuario):
-    datos = db_get_user(user_id) or {}
+    try:
+        datos = db_get_user(user_id) or {}
+    except Exception as e:
+        print("Error creando panel:", repr(e))
+        datos = {}
+
     cuenta_1xbet = datos.get('xbet_id', 'No configurada')
     tarjeta = datos.get('card', 'No configurada')
     movil = datos.get('phone_number', 'No configurado')
