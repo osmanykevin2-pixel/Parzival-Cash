@@ -1,43 +1,78 @@
-import json
 import os
 from datetime import datetime, timedelta
 
 import telebot
+from dotenv import load_dotenv
+from supabase import create_client
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-bot = telebot.TeleBot("8686137791:AAF4TOoXMoVLoP_FireDqIpsbbw4rFQru6w")
+load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_AFILIADOS") or os.getenv("TELEGRAM_BOT_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6273485735"))
+
+# Puedes usar IDs reales o usernames publicos.
+CANAL_INFO_CHAT = os.getenv("AFILIADOS_CANAL_CHAT", "@CanalParzivalCash")
+COMUNIDAD_CHAT = os.getenv("AFILIADOS_COMUNIDAD_CHAT", "@GrupoParzivalCash")
+
+CANAL_INFO_LINK = os.getenv("AFILIADOS_CANAL_LINK", "https://t.me/CanalParzivalCash")
+COMUNIDAD_LINK = os.getenv("AFILIADOS_COMUNIDAD_LINK", "https://t.me/GrupoParzivalCash")
+BOT_PRINCIPAL_LINK = os.getenv("BOT_PRINCIPAL_LINK", "https://t.me/ParzivalCash_bot")
+BOT_AFILIADOS_USERNAME = os.getenv("BOT_AFILIADOS_USERNAME", "AfiliadosParzivalCash_bot")
+
+BONO_POR_REFERIDO = int(os.getenv("BONO_POR_REFERIDO", "10"))
+RETIRO_MINIMO = int(os.getenv("RETIRO_MINIMO", "100"))
+RETIRO_COOLDOWN_DIAS = int(os.getenv("RETIRO_COOLDOWN_DIAS", "3"))
+
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("Falta TELEGRAM_BOT_TOKEN_AFILIADOS o TELEGRAM_BOT_TOKEN en .env")
+
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 bot.remove_webhook()
 
-ADMIN_ID = 6273485735
-DATA_FILE = "afiliados_data.json"
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-BONO_POR_REFERIDO = 10
-RETIRO_MINIMO = 100
-RETIRO_COOLDOWN_DIAS = 3
-
-CANAL_INFO_LINK = "https://t.me/CanalParzivalCash"
-COMUNIDAD_LINK = "https://t.me/GrupoParzivalCash"
-BOT_PRINCIPAL_LINK = "https://t.me/ParzivalCash_bot"
-BOT_AFILIADOS_USERNAME = "AfiliadosParzivalCash_bot"
-
-data = {}
+# Datos temporales del flujo. No crean usuarios en DB antes de validar.
+pending_referrals = {}
 waiting_withdraw_amount = {}
+pending_withdrawals = {}
+next_withdrawal_id = 1
 
 
-def cargar_datos():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "users": {},
-        "withdrawals": {},
-        "next_withdrawal_id": 1
-    }
+def db_get_user(user_id: int):
+    result = (
+        supabase.table("users")
+        .select("*")
+        .eq("telegram_user_id", int(user_id))
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
 
 
-def guardar_datos():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def db_upsert_user(user_id: int, data: dict):
+    payload = {"telegram_user_id": int(user_id)}
+    payload.update(data)
+    return (
+        supabase.table("users")
+        .upsert(payload, on_conflict="telegram_user_id")
+        .execute()
+    )
+
+
+def db_get_top_users(limit: int = 10):
+    result = (
+        supabase.table("users")
+        .select("telegram_user_id, telegram_username, referrals, balance_afiliados")
+        .order("referrals", desc=True)
+        .order("balance_afiliados", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return result.data or []
 
 
 def obtener_nombre_visible(user_obj):
@@ -46,24 +81,6 @@ def obtener_nombre_visible(user_obj):
     if user_obj.username and user_obj.username.strip():
         return user_obj.username.strip()
     return "Usuario"
-
-
-def obtener_usuario(user_id, nombre_visible="Usuario"):
-    user_id = str(user_id)
-
-    if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "name": nombre_visible,
-            "referrals": 0,
-            "balance": 0,
-            "referred_by": None,
-            "last_withdraw": None
-        }
-    else:
-        data["users"][user_id]["name"] = nombre_visible
-
-    guardar_datos()
-    return data["users"][user_id]
 
 
 def teclado_principal():
@@ -86,10 +103,22 @@ def teclado_principal():
     return markup
 
 
+def teclado_validacion():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(
+        KeyboardButton("📢 Canal de Información"),
+        KeyboardButton("💬 Comunidad ParzivalCash")
+    )
+    markup.row(
+        KeyboardButton("✅ Ya me uní")
+    )
+    return markup
+
+
 def texto_inicio():
     return (
         "🎁 Sistema de Afiliados - Parzival Cash\n\n"
-        "💸 Gana 10 CUP por cada persona que entre a este bot con tu enlace personal.\n\n"
+        f"💸 Gana {BONO_POR_REFERIDO} CUP por cada persona que entre a este bot con tu enlace personal.\n\n"
         "🤖 Desde aquí podrás:\n"
         "• obtener tu link de referido\n"
         "• revisar tu balance\n"
@@ -100,52 +129,64 @@ def texto_inicio():
 
 
 def mostrar_balance(chat_id, user_id):
-    usuario = data["users"].get(str(user_id))
+    usuario = db_get_user(user_id)
+
     if not usuario:
+        bot.send_message(
+            chat_id,
+            "❌ No encontramos tu cuenta en el sistema de afiliados. "
+            "Accede primero desde el bot principal o valida tu ingreso si vienes con un link de referido."
+        )
         return
 
     texto = (
-        f"👤 {usuario['name']}\n"
-        f"👥 Referidos: {usuario['referrals']}\n"
-        f"💰 Balance: {usuario['balance']} CUP"
+        f"👤 {usuario.get('telegram_username', 'Usuario')}\n"
+        f"👥 Referidos: {usuario.get('referrals', 0)}\n"
+        f"💰 Balance: {usuario.get('balance_afiliados', 0)} CUP"
     )
     bot.send_message(chat_id, texto)
 
 
-def procesar_referido(nuevo_user_id, referrer_id, nuevo_nombre):
-    nuevo_user_id = str(nuevo_user_id)
-    referrer_id = str(referrer_id)
+def procesar_referido(nuevo_user_id: int, referrer_id: int):
+    nuevo_user_id = int(nuevo_user_id)
+    referrer_id = int(referrer_id)
 
     if nuevo_user_id == referrer_id:
         return
 
-    if referrer_id not in data["users"]:
+    referrer = db_get_user(referrer_id)
+    if not referrer:
         return
 
-    usuario_nuevo = obtener_usuario(nuevo_user_id, nuevo_nombre)
+    usuario_existente = db_get_user(nuevo_user_id)
 
-    if usuario_nuevo["referred_by"] is not None:
+    # Si ya estaba validado o ya tenía referidor, no sobreescribimos nada.
+    if usuario_existente and (usuario_existente.get("validated") or usuario_existente.get("referred_by")):
         return
 
-    usuario_nuevo["referred_by"] = referrer_id
-    data["users"][referrer_id]["referrals"] += 1
-    data["users"][referrer_id]["balance"] += BONO_POR_REFERIDO
-    guardar_datos()
+    # Guardamos pendiente en memoria. Aún NO se crea ni modifica fila del usuario nuevo.
+    pending_referrals[nuevo_user_id] = referrer_id
 
+
+def esta_en_chat(chat_ref, user_id):
     try:
-        bot.send_message(
-            int(referrer_id),
-            f"🎉 Nuevo referido registrado\n\n"
-            f"👤 Usuario: {nuevo_nombre}\n"
-            f"💸 Ganancia acreditada: {BONO_POR_REFERIDO} CUP\n"
-            f"💰 Nuevo balance: {data['users'][referrer_id]['balance']} CUP"
-        )
+        estado = bot.get_chat_member(chat_ref, int(user_id))
+        return estado.status in ["member", "administrator", "creator"]
     except Exception as e:
-        print("No se pudo notificar al referidor:", e)
+        print(f"Error verificando membresía en {chat_ref}: {e}")
+        return False
+
+
+def esta_en_canal(user_id):
+    return esta_en_chat(CANAL_INFO_CHAT, user_id)
+
+
+def esta_en_grupo(user_id):
+    return esta_en_chat(COMUNIDAD_CHAT, user_id)
 
 
 def puede_retirar(user_id):
-    usuario = data["users"].get(str(user_id))
+    usuario = db_get_user(user_id)
     if not usuario:
         return False, "Usuario no encontrado."
 
@@ -154,13 +195,15 @@ def puede_retirar(user_id):
         return True, None
 
     try:
-        fecha_ultima = datetime.fromisoformat(ultima)
+        fecha_ultima = datetime.fromisoformat(ultima.replace("Z", "+00:00"))
     except Exception:
         return True, None
 
+    ahora = datetime.now(fecha_ultima.tzinfo) if fecha_ultima.tzinfo else datetime.now()
     proximo_retiro = fecha_ultima + timedelta(days=RETIRO_COOLDOWN_DIAS)
-    if datetime.now() < proximo_retiro:
-        faltante = proximo_retiro - datetime.now()
+
+    if ahora < proximo_retiro:
+        faltante = proximo_retiro - ahora
         dias = faltante.days
         horas = int((faltante.seconds or 0) / 3600)
         return False, f"⏳ Podrás retirar nuevamente en aproximadamente {dias} días y {horas} horas."
@@ -169,44 +212,43 @@ def puede_retirar(user_id):
 
 
 def mostrar_ranking(chat_id):
-    usuarios = list(data["users"].values())
+    usuarios = db_get_top_users(10)
 
     if not usuarios:
         bot.send_message(chat_id, "📊 Aún no hay usuarios en el ranking.")
         return
 
-    top = sorted(
-        usuarios,
-        key=lambda u: (u.get("referrals", 0), u.get("balance", 0)),
-        reverse=True
-    )[:10]
-
     texto = "🏆 Top 10 de Afiliados\n\n"
 
-    for i, usuario in enumerate(top, start=1):
-        texto += (
-            f"{i}. {usuario.get('name', 'Usuario')} — "
-            f"{usuario.get('referrals', 0)} referidos — "
-            f"{usuario.get('balance', 0)} CUP\n"
-        )
+    for i, usuario in enumerate(usuarios, start=1):
+        nombre = usuario.get("telegram_username") or f"Usuario {usuario.get('telegram_user_id')}"
+        referrals = usuario.get("referrals", 0) or 0
+        balance = usuario.get("balance_afiliados", 0) or 0
+        texto += f"{i}. {nombre} — {referrals} referidos — {balance} CUP\n"
 
     bot.send_message(chat_id, texto)
 
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    nombre_visible = obtener_nombre_visible(message.from_user)
-    user_id = message.from_user.id
+    user_id = int(message.from_user.id)
+    partes = message.text.split(maxsplit=1)
 
-    obtener_usuario(user_id, nombre_visible)
-
-    partes = message.text.split()
-
+    # Si viene con link de referido, solo guardamos el pendiente y mostramos validación.
     if len(partes) > 1:
-        referrer_id = partes[1]
-        if referrer_id.isdigit():
-            procesar_referido(user_id, referrer_id, nombre_visible)
+        referrer_id = partes[1].strip()
 
+        if referrer_id.isdigit():
+            procesar_referido(user_id, int(referrer_id))
+
+            bot.send_message(
+                message.chat.id,
+                texto_inicio() + "\n\n⚠️ Debes unirte al canal y al grupo antes de continuar.",
+                reply_markup=teclado_validacion()
+            )
+            return
+
+    # Sin referido: acceso directo.
     bot.send_message(
         message.chat.id,
         texto_inicio(),
@@ -216,31 +258,86 @@ def start(message):
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
-    if message.from_user.id != ADMIN_ID:
+    if int(message.from_user.id) != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ No autorizado.")
         return
 
-    total_users = len(data["users"])
-    total_balance = sum(user["balance"] for user in data["users"].values())
-    total_withdrawals = len(data["withdrawals"])
-    pendientes = sum(1 for w in data["withdrawals"].values() if w["status"] == "pendiente")
+    users_result = supabase.table("users").select("telegram_user_id", count="exact").execute()
+    total_users = users_result.count or 0
+
+    balance_result = supabase.table("users").select("balance_afiliados").execute()
+    total_balance = sum((u.get("balance_afiliados") or 0) for u in (balance_result.data or []))
+
+    pendientes = len(pending_withdrawals)
 
     texto = (
         "🛠️ Panel de Admin\n\n"
         f"👥 Usuarios registrados: {total_users}\n"
         f"💰 Balance total acumulado: {total_balance} CUP\n"
-        f"🏧 Solicitudes de retiro: {total_withdrawals}\n"
-        f"🕐 Retiros pendientes: {pendientes}"
+        f"🏧 Retiros pendientes en memoria: {pendientes}"
     )
 
     bot.send_message(message.chat.id, texto)
 
 
+@bot.message_handler(commands=['aprobar'])
+def aprobar_retiro(message):
+    if int(message.from_user.id) != ADMIN_ID:
+        bot.send_message(message.chat.id, "❌ No autorizado.")
+        return
+
+    partes = message.text.split()
+    if len(partes) < 2:
+        bot.send_message(message.chat.id, "Uso correcto:\n/aprobar ID_SOLICITUD")
+        return
+
+    withdraw_id = partes[1]
+
+    if withdraw_id not in pending_withdrawals:
+        bot.send_message(message.chat.id, "❌ Solicitud no encontrada.")
+        return
+
+    retiro = pending_withdrawals[withdraw_id]
+    uid = int(retiro["user_id"])
+    amount = retiro["amount"]
+
+    usuario = db_get_user(uid)
+    if not usuario:
+        bot.send_message(message.chat.id, "❌ Usuario no encontrado.")
+        return
+
+    balance_actual = usuario.get("balance_afiliados", 0) or 0
+    if balance_actual < amount:
+        bot.send_message(message.chat.id, "❌ El usuario ya no tiene saldo suficiente.")
+        return
+
+    db_upsert_user(uid, {
+        "balance_afiliados": balance_actual - amount,
+        "last_withdraw": datetime.utcnow().isoformat()
+    })
+
+    pending_withdrawals.pop(withdraw_id, None)
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ Retiro aprobado para el usuario {uid} por {amount} CUP."
+    )
+
+    try:
+        bot.send_message(
+            uid,
+            f"✅ Tu retiro fue aprobado correctamente.\n\n"
+            f"💰 Monto: {amount} CUP"
+        )
+    except Exception as e:
+        print("No se pudo notificar retiro aprobado:", e)
+
+
 @bot.message_handler(func=lambda message: True)
 def menu(message):
-    user_id = str(message.from_user.id)
-    nombre_visible = obtener_nombre_visible(message.from_user)
-    obtener_usuario(user_id, nombre_visible)
+    global next_withdrawal_id
+
+    user_id = int(message.from_user.id)
 
     if message.text == "📢 Canal de Información":
         bot.send_message(
@@ -264,14 +361,22 @@ def menu(message):
         )
 
     elif message.text == "🔗 Link de referidos":
-        usuario = data["users"][user_id]
+        usuario = db_get_user(user_id)
+
+        if not usuario:
+            bot.send_message(
+                message.chat.id,
+                "❌ Tu cuenta aún no está activa en el sistema de afiliados."
+            )
+            return
+
         link = f"https://t.me/{BOT_AFILIADOS_USERNAME}?start={user_id}"
 
         texto = (
             f"🔗 Tu link de referido:\n\n"
             f"{link}\n\n"
-            f"👥 Referidos actuales: {usuario['referrals']}\n"
-            f"💰 Ganancias acumuladas: {usuario['balance']} CUP\n\n"
+            f"👥 Referidos actuales: {usuario.get('referrals', 0)}\n"
+            f"💰 Ganancias acumuladas: {usuario.get('balance_afiliados', 0)} CUP\n\n"
             f"🎁 Ganas {BONO_POR_REFERIDO} CUP por cada persona que entre con tu enlace."
         )
 
@@ -288,18 +393,27 @@ def menu(message):
         mostrar_ranking(message.chat.id)
 
     elif message.text == "🏧 Retirar":
-        usuario = data["users"].get(user_id)
+        usuario = db_get_user(user_id)
+
+        if not usuario:
+            bot.send_message(
+                message.chat.id,
+                "❌ Tu cuenta aún no está activa en el sistema de afiliados."
+            )
+            return
 
         permitido, motivo = puede_retirar(user_id)
         if not permitido:
             bot.send_message(message.chat.id, motivo)
             return
 
-        if usuario["balance"] < RETIRO_MINIMO:
+        balance_actual = usuario.get("balance_afiliados", 0) or 0
+
+        if balance_actual < RETIRO_MINIMO:
             bot.send_message(
                 message.chat.id,
                 f"❌ No puedes retirar todavía.\n\n"
-                f"💰 Balance actual: {usuario['balance']} CUP\n"
+                f"💰 Balance actual: {balance_actual} CUP\n"
                 f"📌 Retiro mínimo: {RETIRO_MINIMO} CUP"
             )
             return
@@ -309,9 +423,84 @@ def menu(message):
         bot.send_message(
             message.chat.id,
             f"🏧 Solicitud de retiro\n\n"
-            f"💰 Balance actual: {usuario['balance']} CUP\n"
+            f"💰 Balance actual: {balance_actual} CUP\n"
             f"📌 Mínimo: {RETIRO_MINIMO} CUP\n\n"
             "✍️ Escribe ahora el monto que deseas retirar."
+        )
+
+    elif message.text == "✅ Ya me uní":
+        if not esta_en_canal(user_id) or not esta_en_grupo(user_id):
+            bot.send_message(
+                message.chat.id,
+                "❌ Debes unirte al canal y al grupo antes de continuar."
+            )
+            return
+
+        referrer_id = pending_referrals.get(user_id)
+
+        if referrer_id is None:
+            bot.send_message(
+                message.chat.id,
+                texto_inicio(),
+                reply_markup=teclado_principal()
+            )
+            return
+
+        usuario = db_get_user(user_id)
+
+        # Si ya existe y ya estaba validado, no repetimos nada.
+        if usuario and usuario.get("validated"):
+            pending_referrals.pop(user_id, None)
+            bot.send_message(
+                message.chat.id,
+                texto_inicio(),
+                reply_markup=teclado_principal()
+            )
+            return
+
+        nombre_visible = obtener_nombre_visible(message.from_user)
+
+        if not usuario:
+            db_upsert_user(user_id, {
+                "telegram_username": nombre_visible,
+                "referrals": 0,
+                "balance_afiliados": 0,
+                "referred_by": referrer_id,
+                "validated": True
+            })
+        else:
+            db_upsert_user(user_id, {
+                "telegram_username": nombre_visible,
+                "referred_by": usuario.get("referred_by") or referrer_id,
+                "validated": True
+            })
+
+        referrer = db_get_user(referrer_id)
+        if referrer:
+            nuevo_referrals = (referrer.get("referrals") or 0) + 1
+            nuevo_balance = (referrer.get("balance_afiliados") or 0) + BONO_POR_REFERIDO
+
+            db_upsert_user(referrer_id, {
+                "referrals": nuevo_referrals,
+                "balance_afiliados": nuevo_balance
+            })
+
+            try:
+                bot.send_message(
+                    int(referrer_id),
+                    f"🎉 Nuevo referido validado\n\n"
+                    f"👤 Usuario: {nombre_visible}\n"
+                    f"💸 Ganancia: {BONO_POR_REFERIDO} CUP"
+                )
+            except Exception as e:
+                print("No se pudo notificar al referidor:", e)
+
+        pending_referrals.pop(user_id, None)
+
+        bot.send_message(
+            message.chat.id,
+            "✅ Verificación completada. Ya puedes usar el bot.",
+            reply_markup=teclado_principal()
         )
 
     elif user_id in waiting_withdraw_amount:
@@ -322,7 +511,14 @@ def menu(message):
             return
 
         monto = int(texto)
-        usuario = data["users"].get(user_id)
+        usuario = db_get_user(user_id)
+
+        if not usuario:
+            bot.send_message(message.chat.id, "❌ Usuario no encontrado.")
+            waiting_withdraw_amount.pop(user_id, None)
+            return
+
+        balance_actual = usuario.get("balance_afiliados", 0) or 0
 
         if monto < RETIRO_MINIMO:
             bot.send_message(
@@ -331,25 +527,23 @@ def menu(message):
             )
             return
 
-        if monto > usuario["balance"]:
+        if monto > balance_actual:
             bot.send_message(
                 message.chat.id,
                 f"❌ No tienes saldo suficiente.\n\n"
-                f"💰 Balance actual: {usuario['balance']} CUP"
+                f"💰 Balance actual: {balance_actual} CUP"
             )
             return
 
-        withdraw_id = str(data["next_withdrawal_id"])
-        data["next_withdrawal_id"] += 1
+        withdraw_id = str(next_withdrawal_id)
+        next_withdrawal_id += 1
 
-        data["withdrawals"][withdraw_id] = {
+        pending_withdrawals[withdraw_id] = {
             "user_id": user_id,
-            "name": usuario["name"],
+            "name": usuario.get("telegram_username", "Usuario"),
             "amount": monto,
-            "status": "pendiente",
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.utcnow().isoformat()
         }
-        guardar_datos()
 
         waiting_withdraw_amount.pop(user_id, None)
 
@@ -361,15 +555,21 @@ def menu(message):
         )
 
         try:
+            tarjeta = usuario.get("card", "No configurada")
+            markup_admin = InlineKeyboardMarkup()
+            markup_admin.row(
+                InlineKeyboardButton("✅ Completar", callback_data=f"aprobar_{withdraw_id}"),
+                InlineKeyboardButton("❌ Rechazar", callback_data=f"rechazar_{withdraw_id}")
+            )           
             bot.send_message(
                 ADMIN_ID,
                 f"🏧 Nueva solicitud de retiro\n\n"
                 f"🆔 Solicitud: {withdraw_id}\n"
-                f"👤 Usuario: {usuario['name']}\n"
+                f"👤 Usuario: {usuario.get('telegram_username', 'Usuario')}\n"
                 f"🆔 ID Telegram: {user_id}\n"
-                f"💰 Monto: {monto} CUP\n\n"
-                f"Para aprobar manualmente usa:\n"
-                f"/aprobar {withdraw_id}"
+                f"💳 Tarjeta: {tarjeta}\n"
+                f"💰 Monto: {monto} CUP\n\n",
+                reply_markup=markup_admin
             )
         except Exception as e:
             print("No se pudo enviar solicitud al admin:", e)
@@ -380,62 +580,68 @@ def menu(message):
             "Escribe /start para abrir el menú."
         )
 
+@bot.callback_query_handler(func=lambda call: True)
+def handle_admin_actions(call):
 
-@bot.message_handler(commands=['aprobar'])
-def aprobar_retiro(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.chat.id, "❌ No autorizado.")
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ No autorizado")
         return
 
-    partes = message.text.split()
-    if len(partes) < 2:
-        bot.send_message(message.chat.id, "Uso correcto:\n/aprobar ID_SOLICITUD")
-        return
+    data = call.data
 
-    withdraw_id = partes[1]
+    if data.startswith("aprobar_"):
+        withdraw_id = data.replace("aprobar_", "")
 
-    if withdraw_id not in data["withdrawals"]:
-        bot.send_message(message.chat.id, "❌ Solicitud no encontrada.")
-        return
+        if withdraw_id not in pending_withdrawals:
+            bot.answer_callback_query(call.id, "❌ No encontrada")
+            return
 
-    retiro = data["withdrawals"][withdraw_id]
+        retiro = pending_withdrawals[withdraw_id]
+        user_id = retiro["user_id"]
+        amount = retiro["amount"]
 
-    if retiro["status"] != "pendiente":
-        bot.send_message(message.chat.id, "⚠️ Esta solicitud ya fue procesada.")
-        return
+        usuario = db_get_user(user_id)
+        balance = usuario.get("balance_afiliados", 0)
 
-    uid = str(retiro["user_id"])
-    amount = retiro["amount"]
+        if balance < amount:
+            bot.send_message(call.message.chat.id, "❌ Sin saldo suficiente")
+            return
 
-    if uid not in data["users"]:
-        bot.send_message(message.chat.id, "❌ Usuario no encontrado.")
-        return
+        db_upsert_user(user_id, {
+            "balance_afiliados": balance - amount,
+            "last_withdraw": datetime.utcnow().isoformat()
+        })
 
-    if data["users"][uid]["balance"] < amount:
-        bot.send_message(message.chat.id, "❌ El usuario ya no tiene saldo suficiente.")
-        return
+        bot.send_message(user_id, f"✅ Tu retiro fue exitoso\n💰 {amount} CUP")
 
-    data["users"][uid]["balance"] -= amount
-    data["users"][uid]["last_withdraw"] = datetime.now().isoformat()
-    retiro["status"] = "aprobado"
-    guardar_datos()
-
-    bot.send_message(
-        message.chat.id,
-        f"✅ Retiro aprobado para el usuario {uid} por {amount} CUP."
-    )
-
-    try:
-        bot.send_message(
-            int(uid),
-            f"✅ Tu retiro fue aprobado correctamente.\n\n"
-            f"💰 Monto: {amount} CUP"
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
         )
-    except Exception as e:
-        print("No se pudo notificar retiro aprobado:", e)
 
+        bot.answer_callback_query(call.id, "✅ Aprobado")
 
-data = cargar_datos()
+    elif data.startswith("rechazar_"):
+        withdraw_id = data.replace("rechazar_", "")
+
+        if withdraw_id not in pending_withdrawals:
+            bot.answer_callback_query(call.id, "❌ No encontrada")
+            return
+
+        retiro = pending_withdrawals[withdraw_id]
+        user_id = retiro["user_id"]
+
+        bot.send_message(user_id, "❌ Tu solicitud fue rechazada")
+
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
+        )
+
+        bot.answer_callback_query(call.id, "❌ Rechazado")
+
 
 print("✅ Bot de afiliados iniciado...")
 bot.infinity_polling(skip_pending=True)

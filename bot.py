@@ -32,6 +32,44 @@ GRUPO_LINK = "https://t.me/GrupoParzivalCash"
 CANAL_LINK = "https://t.me/CanalParzivalCash"
 AFILIADOS_LINK = "https://t.me/AfiliadosParzivalCash_bot?start=parzival"
 
+def is_admin(user_id):
+    user = db_get_user(user_id)
+    return user and user.get("is_admin") == True
+
+def get_config(key):
+    result = (
+        supabase.table("config")
+        .select("value")
+        .eq("key", key)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["value"] if result.data else None
+
+
+def set_config(key, value):
+    supabase.table("config").upsert({
+        "key": key,
+        "value": value
+    }).execute()
+
+def guardar_precio_tarjeta(message):
+    if not message.text.isdigit():
+        bot.send_message(message.chat.id, "❌ Solo números.")
+        return
+
+    set_config("precio_tarjeta", float(message.text))
+    bot.send_message(message.chat.id, "✅ Precio de tarjeta actualizado")
+
+
+def guardar_precio_movil(message):
+    if not message.text.isdigit():
+        bot.send_message(message.chat.id, "❌ Solo números.")
+        return
+
+    set_config("precio_movil", float(message.text))
+    bot.send_message(message.chat.id, "✅ Precio de móvil actualizado")
+
 def ensure_user_exists(user_id, username=None):
     try:
         existing = (
@@ -48,6 +86,35 @@ def ensure_user_exists(user_id, username=None):
             }).execute()
     except Exception as e:
         print(f"Error asegurando usuario en BD: {e}")
+
+def guardar_monto_recarga(message, recharge_id):
+    texto = message.text.strip()
+
+    if not texto.isdigit():
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ Monto no válido. Envíe solo números."
+        )
+        bot.register_next_step_handler(msg, guardar_monto_recarga, recharge_id)
+        return
+
+    monto = float(texto)
+
+    if recharge_id not in pending_recharges:
+        bot.send_message(message.chat.id, "❌ Error interno.")
+        return
+
+    pending_recharges[recharge_id]["monto"] = monto
+
+    user_id = message.from_user.id
+    metodo = user_data.get(user_id, {}).get("metodo_pago")
+
+    pending_recharges[recharge_id]["metodo"] = metodo
+
+    bot.send_message(
+        message.chat.id,
+        "✅ Monto registrado correctamente.\n⏳ Esperando validación del cajero."
+    )
 
 def db_get_user(user_id):
     for intento in range(3):
@@ -144,7 +211,7 @@ def send_screen(user_id, chat_id, text, reply_markup=None, photo_path=None, pars
         bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
-def crear_menu_principal():
+def crear_menu_principal(user_id):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("👤 Panel de Usuario", callback_data='panel'),
@@ -166,6 +233,10 @@ def crear_menu_principal():
         InlineKeyboardButton("💬 Grupo de Chat", callback_data='grupo'),
         InlineKeyboardButton("📢 Canal de Información", callback_data='canal')
     )
+    if is_admin(user_id):
+        markup.add(
+            InlineKeyboardButton("⚙️ Configuración", callback_data='config_admin')
+        )
     return markup
 
 
@@ -195,7 +266,7 @@ Recarga **3 USD$** y recibe **5 USD$** 👇
     bot.send_message(
         chat_id,
         texto,
-        reply_markup=crear_menu_principal(),
+        reply_markup=crear_menu_principal(user_id),
         parse_mode='Markdown'
     )
 
@@ -209,13 +280,15 @@ def mostrar_inicio_corto(chat_id, user_id):
         user_id,
         chat_id,
         texto,
-        reply_markup=crear_menu_principal()
+        reply_markup=crear_menu_principal(user_id)
     )
 
 
 def crear_panel_usuario(user_id, nombre_usuario):
     try:
         datos = db_get_user(user_id) or {}
+        total_tarjeta = datos.get("total_recargas_tarjeta", 0) or 0
+        total_movil = datos.get("total_recargas_movil", 0) or 0
     except Exception as e:
         print("Error creando panel:", repr(e))
         datos = {}
@@ -239,6 +312,10 @@ def crear_panel_usuario(user_id, nombre_usuario):
 **Direcciones de crédito:**
 💳 **Tarjeta CUP:** {tarjeta}
 📱 **Saldo Móvil:** {movil}
+
+💰 **Total recargado:**
+💳 Tarjeta: {total_tarjeta} CUP
+📱 Móvil: {total_movil} CUP
 
 ✅ Comprueba que Parzival Cash es un cajero oficial solicitando una verificación. Se enviará un mensaje al buzón de su cuenta en el sitio oficial de 1XBET."""
     return texto_panel, markup_panel
@@ -403,7 +480,9 @@ def pedir_comprobante_recarga(message):
         "cuenta_1xbet": cuenta_1xbet,
         "tarjeta_usuario": tarjeta_usuario,
         "movil_usuario": movil_usuario,
-        "status": "pendiente"
+        "status": "pendiente",
+        "metodo": None,
+        "monto": None
     }
 
     send_screen(
@@ -413,6 +492,12 @@ def pedir_comprobante_recarga(message):
         "⏳ Su recarga será revisada por el cajero.\n"
         "📨 Espere la confirmación final."
     )
+
+    msg = bot.send_message(
+        message.chat.id,
+        "💰 Introduzca el monto que envió en CUP:"
+    )
+    bot.register_next_step_handler(msg, guardar_monto_recarga, recharge_id)
 
     markup_admin = InlineKeyboardMarkup(row_width=2)
     markup_admin.add(
@@ -752,17 +837,24 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
         elif call.data == 'recarga_tarjeta':
             bot.answer_callback_query(call.id, "💳 Tarjeta CUP")
 
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]["metodo_pago"] = "tarjeta"
+
             markup_pagado = InlineKeyboardMarkup(row_width=1)
             markup_pagado.add(
                 InlineKeyboardButton("✔️ He Pagado", callback_data='he_pagado_tarjeta'),
                 InlineKeyboardButton("🏠 Inicio", callback_data='inicio')
             )
 
+            precio = get_config("precio_tarjeta")
+            preciomax = precio * 50
+
             texto_tarjeta = (
-                "💱 **590 CUP = 1 USD$**\n\n"
+                f"💱 **{precio} CUP = 1 USD$**\n\n"
                 "📊 **Rango de Depósito en CUP:**\n"
                 "💳 **Tarjeta CUP**\n\n"
-                "**Mín:** 590 CUP - **Máx:** 29500 CUP\n\n"
+                f"**Mín:** {precio} - **Máx:** {preciomax} CUP\n\n"
                 "⏳ En breve recibirá los datos para realizar el depósito; se acreditará USD$ a su cuenta según la tasa de cambio actual.\n\n"
                 "💳 **Envíe CUP a la siguiente Tarjeta**\n"
                 "👇 *(Pulse el número para copiar)*\n\n"
@@ -771,7 +863,6 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
                 "👇 *(Pulse el número para copiar)*\n\n"
                 "`56587187`\n\n"
                 "📸 Al hacer su pago por Transfermóvil, realice una captura del pago y presione **\"✔️ He Pagado\"**.\n\n"
-                "🍎 Si realizó la transferencia desde iPhone, envíe también captura de la transferencia y de sus últimas operaciones, luego presione **\"✔️ He Pagado\"**.\n\n"
                 "⚠️ Presione el botón únicamente después de efectuar el pago."
             )
 
@@ -789,7 +880,6 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
                 chat_id,
                 "📸 **Ahora envíe la captura o comprobante del pago.**\n\n"
                 "✅ Sin recortes ni tachones.\n"
-                "🍎 Si usa iPhone, envíe también la captura de la transferencia y sus últimas operaciones."
             )
             msg = bot.send_message(chat_id, "📎 Envíe ahora el comprobante:")
             bot.register_next_step_handler(msg, pedir_comprobante_recarga)
@@ -797,23 +887,30 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
         elif call.data == 'recarga_saldo':
             bot.answer_callback_query(call.id, "📱 Saldo Móvil")
 
+            if user_id not in user_data:
+                user_data[user_id] = {}
+
+            user_data[user_id]["metodo_pago"] = "movil"
+
             markup_pagado_saldo = InlineKeyboardMarkup(row_width=1)
             markup_pagado_saldo.add(
                 InlineKeyboardButton("✔️ He Pagado", callback_data='he_pagado_saldo'),
                 InlineKeyboardButton("🏠 Inicio", callback_data='inicio')
             )
 
+            preciosaldo = get_config("precio_movil")
+            preciomovilmax = preciosaldo * 50
+
             texto_saldo = (
-                "💱 **235 CUP = 1 USD$**\n\n"
+                f"💱 **{preciosaldo} CUP = 1 USD$**\n\n"
                 "📊 **Rango de Depósito en CUP:**\n"
                 "📱 **Saldo Móvil**\n\n"
-                "**Mín:** 235 CUP - **Máx:** 11750 CUP\n\n"
+                f"**Mín:** {preciosaldo} CUP - **Máx:** {preciomovilmax} CUP\n\n"
                 "⏳ En breve recibirá los datos para realizar el depósito; se acreditará USD$ a su cuenta según la tasa de cambio actual.\n\n"
                 "📱 **Envíe el saldo móvil al siguiente número**\n"
                 "👇 *(Pulse el número para copiar)*\n\n"
                 "`56587187`\n\n"
                 "📸 Después de realizar el envío, haga una captura del comprobante y presione **\"✔️ He Pagado\"**.\n\n"
-                "🍎 Si realizó el pago desde iPhone, envíe también captura de la transferencia y de sus últimas operaciones.\n\n"
                 "⚠️ Presione el botón únicamente después de efectuar el pago."
             )
 
@@ -831,7 +928,6 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
                 chat_id,
                 "📸 **Ahora envíe la captura o comprobante del pago por saldo móvil.**\n\n"
                 "✅ Sin recortes ni tachones.\n"
-                "🍎 Si usa iPhone, envíe también la captura de la transferencia y sus últimas operaciones."
             )
             msg = bot.send_message(chat_id, "📎 Envíe ahora el comprobante:")
             bot.register_next_step_handler(msg, pedir_comprobante_recarga)
@@ -1097,7 +1193,7 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
             if admin_id != ADMIN_ID:
                 bot.answer_callback_query(call.id, "❌ No autorizado.")
                 return
-
+        
             recharge_id = call.data.replace("aprobar_recarga_", "")
 
             if recharge_id not in pending_recharges:
@@ -1110,7 +1206,37 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
                 bot.answer_callback_query(call.id, "⚠️ Esta solicitud ya fue procesada.")
                 return
 
+             # 🔥 CAMBIO DE ESTADO
             solicitud["status"] = "aprobada"
+
+             # 🔥 🔥 🔥 AQUÍ VA EL PASO 6 🔥 🔥 🔥
+            monto = solicitud.get("monto")
+            metodo = solicitud.get("metodo")
+            user_id = solicitud["user_id"]
+
+            print("DEBUG -> monto:", monto)
+            print("DEBUG -> metodo:", metodo)
+
+            if monto and metodo:
+                user_db = db_get_user(user_id) or {}
+        
+                if metodo == "tarjeta":
+                    total_actual = user_db.get("total_recargas_tarjeta", 0) or 0
+                    nuevo_total = total_actual + monto
+        
+                    db_upsert_user(user_id, {
+                        "total_recargas_tarjeta": nuevo_total
+                    })
+        
+                elif metodo == "movil":
+                    total_actual = user_db.get("total_recargas_movil", 0) or 0
+                    nuevo_total = total_actual + monto
+        
+                    db_upsert_user(user_id, {
+                        "total_recargas_movil": nuevo_total
+                    })
+
+            # 🔥 RESPUESTA NORMAL DEL BOT (NO TOCAR)
             bot.answer_callback_query(call.id, "✅ Recarga aprobada")
 
             try:
@@ -1435,6 +1561,26 @@ Puedes volver a configurar tus direcciones siempre que lo desees."""
                 bot.edit_message_reply_markup(chat_id=chat_id, message_id=call.message.message_id, reply_markup=None)
             except Exception:
                 pass
+
+        elif call.data == 'config_admin':
+            if user_id not in ADMINS:
+                return
+
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                InlineKeyboardButton("💳 Cambiar precio tarjeta", callback_data='set_tarjeta'),
+                InlineKeyboardButton("📱 Cambiar precio móvil", callback_data='set_movil')
+            )
+
+            send_screen(user_id, chat_id, "⚙️ Configuración de precios", reply_markup=markup)
+        
+        elif call.data == 'set_tarjeta':
+            msg = bot.send_message(chat_id, "💳 Nuevo precio para tarjeta:")
+            bot.register_next_step_handler(msg, guardar_precio_tarjeta)
+
+        elif call.data == 'set_movil':
+            msg = bot.send_message(chat_id, "📱 Nuevo precio para saldo móvil:")
+            bot.register_next_step_handler(msg, guardar_precio_movil)
 
         else:
             bot.answer_callback_query(call.id, "✅ Opción seleccionada")

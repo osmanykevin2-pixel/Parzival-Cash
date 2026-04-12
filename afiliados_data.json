@@ -1,0 +1,21 @@
+{
+  "users": {
+    "2002725655": {
+      "name": "Leo",
+      "referrals": 1,
+      "balance": 10,
+      "referred_by": null,
+      "last_withdraw": null
+    },
+    "823707443": {
+      "name": "Lisi",
+      "referrals": 0,
+      "balance": 0,
+      "referred_by": "2002725655",
+      "last_withdraw": null,
+      "validated": true
+    }
+  },
+  "withdrawals": {},
+  "next_withdrawal_id": 1
+}
