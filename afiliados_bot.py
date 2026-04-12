@@ -355,7 +355,7 @@ def aprobar_retiro(message):
 
 @bot.message_handler(func=lambda message: True)
 def menu(message):
-
+    
     if message.chat.type != "private":
         return
     global next_withdrawal_id
