@@ -41,6 +41,11 @@ waiting_withdraw_amount = {}
 pending_withdrawals = {}
 next_withdrawal_id = 1
 
+bot.set_my_commands([], scope=telebot.types.BotCommandScopeAllGroupChats())
+
+@bot.message_handler(func=lambda message: message.chat.type != "private")
+def ignore_groups(message):
+    return
 
 def db_get_user(user_id: int):
     result = (
@@ -231,6 +236,8 @@ def mostrar_ranking(chat_id):
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    if message.chat.type != "private":
+        return
     user_id = int(message.from_user.id)
     partes = message.text.split(maxsplit=1)
 
@@ -258,6 +265,10 @@ def start(message):
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
+
+    if message.chat.type != "private":
+        return
+        
     if int(message.from_user.id) != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ No autorizado.")
         return
@@ -335,6 +346,9 @@ def aprobar_retiro(message):
 
 @bot.message_handler(func=lambda message: True)
 def menu(message):
+
+    if message.chat.type != "private":
+        return
     global next_withdrawal_id
 
     user_id = int(message.from_user.id)
