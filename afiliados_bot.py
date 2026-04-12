@@ -35,14 +35,6 @@ if not TELEGRAM_BOT_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 bot.remove_webhook()
 
-@bot.message_handler(func=lambda message: message.chat.type != "private")
-def limpiar_teclado_grupo(message):
-    bot.send_message(
-        message.chat.id,
-        " ",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Datos temporales del flujo. No crean usuarios en DB antes de validar.
@@ -50,12 +42,6 @@ pending_referrals = {}
 waiting_withdraw_amount = {}
 pending_withdrawals = {}
 next_withdrawal_id = 1
-
-bot.set_my_commands([], scope=telebot.types.BotCommandScopeAllGroupChats())
-
-@bot.message_handler(func=lambda message: message.chat.type != "private")
-def ignore_groups(message):
-    return
 
 def db_get_user(user_id: int):
     result = (
@@ -67,6 +53,15 @@ def db_get_user(user_id: int):
     )
     return result.data[0] if result.data else None
 
+from telebot.types import ReplyKeyboardRemove
+
+@bot.message_handler(func=lambda message: message.chat.type != "private")
+def limpiar_grupo(message):
+    bot.send_message(
+        message.chat.id,
+        "🤖 Usa el bot en privado",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 def db_upsert_user(user_id: int, data: dict):
     payload = {"telegram_user_id": int(user_id)}
