@@ -302,6 +302,10 @@ def admin_panel(message):
 
 @bot.message_handler(commands=['aprobar'])
 def aprobar_retiro(message):
+
+    if message.chat.type != "private":
+        return
+    
     if int(message.from_user.id) != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ No autorizado.")
         return
@@ -605,6 +609,9 @@ def menu(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_admin_actions(call):
+
+    if message.chat.type != "private":
+        return
 
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ No autorizado")
