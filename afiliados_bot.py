@@ -29,6 +29,12 @@ BONO_POR_REFERIDO = int(os.getenv("BONO_POR_REFERIDO", "10"))
 RETIRO_MINIMO = int(os.getenv("RETIRO_MINIMO", "100"))
 RETIRO_COOLDOWN_DIAS = int(os.getenv("RETIRO_COOLDOWN_DIAS", "3"))
 
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("Falta TELEGRAM_BOT_TOKEN_AFILIADOS o TELEGRAM_BOT_TOKEN en .env")
+
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+bot.remove_webhook()
+
 @bot.message_handler(func=lambda message: message.chat.type != "private")
 def limpiar_teclado_grupo(message):
     bot.send_message(
@@ -36,12 +42,6 @@ def limpiar_teclado_grupo(message):
         " ",
         reply_markup=ReplyKeyboardRemove()
     )
-
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("Falta TELEGRAM_BOT_TOKEN_AFILIADOS o TELEGRAM_BOT_TOKEN en .env")
-
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-bot.remove_webhook()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
