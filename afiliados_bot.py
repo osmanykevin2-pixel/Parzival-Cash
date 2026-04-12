@@ -7,6 +7,8 @@ from supabase import create_client
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from telebot.types import ReplyKeyboardRemove
+
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_AFILIADOS") or os.getenv("TELEGRAM_BOT_TOKEN")
@@ -26,6 +28,14 @@ BOT_AFILIADOS_USERNAME = os.getenv("BOT_AFILIADOS_USERNAME", "AfiliadosParzivalC
 BONO_POR_REFERIDO = int(os.getenv("BONO_POR_REFERIDO", "10"))
 RETIRO_MINIMO = int(os.getenv("RETIRO_MINIMO", "100"))
 RETIRO_COOLDOWN_DIAS = int(os.getenv("RETIRO_COOLDOWN_DIAS", "3"))
+
+@bot.message_handler(func=lambda message: message.chat.type != "private")
+def limpiar_teclado_grupo(message):
+    bot.send_message(
+        message.chat.id,
+        " ",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("Falta TELEGRAM_BOT_TOKEN_AFILIADOS o TELEGRAM_BOT_TOKEN en .env")
