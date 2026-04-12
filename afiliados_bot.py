@@ -35,6 +35,10 @@ if not TELEGRAM_BOT_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 bot.remove_webhook()
 
+from telebot.types import BotCommandScopeAllGroupChats
+
+bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Datos temporales del flujo. No crean usuarios en DB antes de validar.
