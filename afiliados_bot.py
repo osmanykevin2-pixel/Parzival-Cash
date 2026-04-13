@@ -63,7 +63,6 @@ from telebot.types import ReplyKeyboardRemove
 def limpiar_grupo(message):
     bot.send_message(
         message.chat.id,
-        "🤖 Usa el bot en privado",
         reply_markup=ReplyKeyboardRemove()
     )
 
