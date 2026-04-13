@@ -6,7 +6,7 @@ from supabase import create_client
 import time
 
 pending_xbet_requests = {}
-
+ADMINS = [6273485735,2002725655]
 
 load_dotenv()
 
